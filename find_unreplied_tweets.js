@@ -796,7 +796,20 @@ async function main() {
             console.log(`${index + 1}. ${item.influencer}: ${item.replies} replies, ${item.unreplied_count} unreplied (${item.reply_rate} rate)`);
         });
 
-    return;
+    // Cleanup: Close all scrapers
+    console.log('\n=== CLEANING UP ===');
+    try {
+        for (let i = 0; i < scraperManager.scrapers.length; i++) {
+            console.log(`Closing scraper ${scraperManager.accountNumbers[i]}...`);
+            await scraperManager.scrapers[i].close();
+        }
+        console.log('✓ All scrapers closed successfully');
+    } catch (error) {
+        console.error('Error during cleanup:', error.message);
+    }
+
+    console.log('\n=== SCRIPT COMPLETE ===');
+    process.exit(0);
 }
 
 main(); 
