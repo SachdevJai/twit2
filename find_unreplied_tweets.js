@@ -1,8 +1,8 @@
-const { Scraper, SearchMode } = require("@the-convocation/twitter-scraper");
-const fs = require("fs");
-const dayjs = require("dayjs");
-const { argv } = require("process");
-const dotenv = require("dotenv");
+import { Scraper, SearchMode, ErrorRateLimitStrategy } from "@the-convocation/twitter-scraper";
+import fs from "fs";
+import dayjs from "dayjs";
+import { argv } from "process";
+import dotenv from "dotenv";
 
 // Load environment variables
 dotenv.config();
@@ -27,8 +27,15 @@ class ScraperManager {
     this.timeoutCounts = []; // Track timeouts per scraper
     this.responseTimes = []; // Track average response times
     this.lastRequestTimes = []; // Track when each scraper was last used
+    this.errorCounts = []; // Track consecutive errors per scraper
+    this.circuitBreakerStates = []; // Track circuit breaker state per scraper
+    this.rateLimitInfo = []; // Track rate limit info per scraper
     this.SESSION_TIMEOUT = 1800000; // 30 minutes
     this.REQUESTS_BEFORE_REFRESH = 50; // Refresh after 50 requests
+    this.MAX_CONSECUTIVE_ERRORS = 5; // Circuit breaker threshold
+    this.CIRCUIT_BREAKER_TIMEOUT = 300000; // 5 minutes circuit breaker timeout
+    this.MIN_REQUEST_INTERVAL = 2000; // Minimum 2 seconds between requests
+    this.RATE_LIMIT_COOLDOWN = 60000; // 1 minute cooldown after rate limit
   }
 
   async initialize() {
@@ -55,6 +62,14 @@ class ScraperManager {
         this.timeoutCounts.push(0); // Initialize timeout counter
         this.responseTimes.push([]); // Initialize response time tracking
         this.lastRequestTimes.push(0); // Initialize last request time
+        this.errorCounts.push(0); // Initialize error counter
+        this.circuitBreakerStates.push({ state: 'CLOSED', lastFailureTime: 0 }); // Initialize circuit breaker
+        this.rateLimitInfo.push({ 
+          remaining: 1200, 
+          limit: 1200, 
+          resetTime: 0,
+          lastRateLimitTime: 0 
+        }); // Initialize rate limit info
         console.log(`Scraper ${accountNumber} initialized`);
       }
     }
@@ -82,7 +97,7 @@ class ScraperManager {
       // Check if all three credentials are present
       if (username && password && email) {
         // Check if cookies exist and are valid
-        const cookiesFile = `cookies${i}.json`;
+        const cookiesFile = `data/cookies/cookies${i}.json`;
         const hasValidCookies = await this.checkCookiesValidity(cookiesFile);
         
         if (hasValidCookies) {
@@ -204,72 +219,127 @@ class ScraperManager {
     return true;
   }
 
-  async makeRequest(requestFn, timeoutMs = 5000) {
+    async makeRequest(requestFn, timeoutMs = 5000, maxRetries = 3) {
     // Select the best performing scraper
     this.selectBestScraper();
     
     // Check if current session needs refresh
     await this.checkAndRefreshSession();
     
+    // Check rate limits and enforce cooldowns
+    const currentScraperIndex = this.currentIndex;
+    const rateLimitInfo = this.rateLimitInfo[currentScraperIndex];
+    const now = Date.now();
+    
+    // Check if we're in rate limit cooldown
+    if (now - rateLimitInfo.lastRateLimitTime < this.RATE_LIMIT_COOLDOWN) {
+      const cooldownRemaining = this.RATE_LIMIT_COOLDOWN - (now - rateLimitInfo.lastRateLimitTime);
+      console.log(`⏳ Rate limit cooldown active for scraper ${this.accountNumbers[currentScraperIndex]}, waiting ${Math.round(cooldownRemaining/1000)}s...`);
+      await sleep(cooldownRemaining);
+    }
+    
+    // Check minimum interval between requests
+    const timeSinceLastRequest = now - this.lastRequestTimes[currentScraperIndex];
+    if (timeSinceLastRequest < this.MIN_REQUEST_INTERVAL) {
+      const waitTime = this.MIN_REQUEST_INTERVAL - timeSinceLastRequest;
+      console.log(`⏳ Enforcing minimum interval for scraper ${this.accountNumbers[currentScraperIndex]}, waiting ${Math.round(waitTime/1000)}s...`);
+      await sleep(waitTime);
+    }
+    
+    // Check if rate limit is reset
+    if (rateLimitInfo.resetTime > 0 && now >= rateLimitInfo.resetTime) {
+      console.log(`🔄 Rate limit reset for scraper ${this.accountNumbers[currentScraperIndex]}`);
+      rateLimitInfo.remaining = rateLimitInfo.limit;
+      rateLimitInfo.resetTime = 0;
+    }
+    
+    // Check if we have remaining requests
+    if (rateLimitInfo.remaining <= 0) {
+      console.log(`⚠ Rate limit exhausted for scraper ${this.accountNumbers[currentScraperIndex]}, switching...`);
+      this.switchScraper();
+      return this.makeRequest(requestFn, timeoutMs, maxRetries);
+    }
+    
     // Increment request count and record start time
     this.requestCounts[this.currentIndex]++;
     const requestStartTime = Date.now();
     this.lastRequestTimes[this.currentIndex] = requestStartTime;
     
-    try {
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('timeout')), timeoutMs)
-      );
-      
-      const requestPromise = requestFn(this.getCurrentScraper());
-      const result = await Promise.race([requestPromise, timeoutPromise]);
-      
-      // Record successful response time
-      const responseTime = Date.now() - requestStartTime;
-      this.responseTimes[this.currentIndex].push(responseTime);
-      
-      // Keep only last 10 response times to avoid memory bloat
-      if (this.responseTimes[this.currentIndex].length > 10) {
-        this.responseTimes[this.currentIndex] = this.responseTimes[this.currentIndex].slice(-10);
-      }
-      
-      return result;
-      
-    } catch (error) {
-      if (error.message === 'timeout') {
-        // Increment timeout count for this scraper
-        this.timeoutCounts[this.currentIndex]++;
+    for (let retry = 0; retry <= maxRetries; retry++) {
+      try {
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('timeout')), timeoutMs)
+        );
         
-        console.log(`Request timed out on scraper ${this.accountNumbers[this.currentIndex]} (timeout #${this.timeoutCounts[this.currentIndex]})`);
+        const requestPromise = requestFn(this.getCurrentScraper());
+        const result = await Promise.race([requestPromise, timeoutPromise]);
         
-        // If this scraper has too many timeouts, refresh its session
-        if (this.timeoutCounts[this.currentIndex] >= 3) {
-          console.log(`Scraper ${this.accountNumbers[this.currentIndex]} has ${this.timeoutCounts[this.currentIndex]} timeouts, refreshing session...`);
-          await this.refreshSession(this.currentIndex);
-          this.timeoutCounts[this.currentIndex] = 0; // Reset timeout count
+        // Record successful response time
+        const responseTime = Date.now() - requestStartTime;
+        this.responseTimes[this.currentIndex].push(responseTime);
+        
+        // Keep only last 10 response times to avoid memory bloat
+        if (this.responseTimes[this.currentIndex].length > 10) {
+          this.responseTimes[this.currentIndex] = this.responseTimes[this.currentIndex].slice(-10);
         }
         
-        // Wait before retry
-        console.log(`Waiting 30 seconds before retry...`);
-        await sleep(30000);
+        // Decrement remaining requests
+        this.rateLimitInfo[this.currentIndex].remaining = Math.max(0, this.rateLimitInfo[this.currentIndex].remaining - 1);
         
-        try {
-          // Try once more with the best scraper (which might be different now)
-          this.selectBestScraper();
-          const timeoutPromise2 = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('timeout')), timeoutMs)
-          );
+        // Record success for circuit breaker
+        this.recordSuccess(this.currentIndex);
+        
+        return result;
+        
+      } catch (error) {
+        const isLastRetry = retry === maxRetries;
+        
+        if (error.message === 'timeout' || error.message.includes('Rate limit exceeded')) {
+          // Increment timeout count for this scraper
+          this.timeoutCounts[this.currentIndex]++;
           
-          const requestPromise2 = requestFn(this.getCurrentScraper());
-          return await Promise.race([requestPromise2, timeoutPromise2]);
-        } catch (secondError) {
-          console.log(`Second attempt also failed: ${secondError.message}`);
-          return null;
+          // Record failure for circuit breaker
+          this.recordFailure(this.currentIndex);
+          
+          // Parse rate limit headers if available
+          if (error.message.includes('Rate limit exceeded') && error.headers) {
+            this.parseRateLimitHeaders(error.headers, this.currentIndex);
+          }
+          
+          console.log(`Request failed on scraper ${this.accountNumbers[this.currentIndex]} (attempt ${retry + 1}/${maxRetries + 1}): ${error.message}`);
+          
+          if (isLastRetry) {
+            console.log(`All retries exhausted for scraper ${this.accountNumbers[this.currentIndex]}`);
+            return null;
+          }
+          
+          // For rate limits, use longer backoff and switch scraper immediately
+          if (error.message.includes('Rate limit exceeded')) {
+            const backoffTime = Math.min(10000 * Math.pow(2, retry), 60000); // 10s, 20s, 40s
+            console.log(`Rate limit hit, waiting ${backoffTime/1000}s before retry...`);
+            await sleep(backoffTime);
+            
+            // Switch to next scraper for retry
+            this.switchScraper();
+            continue;
+          }
+          
+          // For timeouts, use shorter backoff
+          const backoffTime = Math.min(5000 * Math.pow(2, retry), 30000);
+          console.log(`Timeout, waiting ${backoffTime/1000}s before retry...`);
+          await sleep(backoffTime);
+          
+          // Switch to next scraper for retry
+          this.switchScraper();
+          continue;
         }
+        
+        // For other errors, throw immediately
+        throw error;
       }
-      
-      throw error;
     }
+    
+        return null;
   }
 
   getSessionStats() {
@@ -278,6 +348,9 @@ class ScraperManager {
         ? Math.round(this.responseTimes[index].reduce((a, b) => a + b, 0) / this.responseTimes[index].length / 1000)
         : 0;
       
+      const rateLimitInfo = this.rateLimitInfo[index];
+      const timeUntilReset = rateLimitInfo.resetTime > 0 ? Math.max(0, Math.round((rateLimitInfo.resetTime - Date.now()) / 1000)) : 0;
+      
       return {
         scraper: this.accountNumbers[index],
         sessionAge: Math.round((Date.now() - this.sessionStartTimes[index]) / 1000),
@@ -285,7 +358,9 @@ class ScraperManager {
         timeSinceRefresh: Math.round((Date.now() - this.lastRefreshTimes[index]) / 1000),
         timeouts: this.timeoutCounts[index],
         avgResponseTime: avgResponseTime,
-        timeSinceLastUse: Math.round((Date.now() - this.lastRequestTimes[index]) / 1000)
+        timeSinceLastUse: Math.round((Date.now() - this.lastRequestTimes[index]) / 1000),
+        rateLimit: `${rateLimitInfo.remaining}/${rateLimitInfo.limit}`,
+        timeUntilReset: timeUntilReset
       };
     });
   }
@@ -298,9 +373,25 @@ class ScraperManager {
     for (let i = 0; i < this.scrapers.length; i++) {
       let score = 100; // Base score
       
+      // Check circuit breaker state
+      const circuitBreaker = this.circuitBreakerStates[i];
+      if (circuitBreaker.state === 'OPEN') {
+        // Check if circuit breaker timeout has passed
+        if (now - circuitBreaker.lastFailureTime > this.CIRCUIT_BREAKER_TIMEOUT) {
+          circuitBreaker.state = 'HALF_OPEN';
+          console.log(`🔄 Circuit breaker for scraper ${this.accountNumbers[i]} moved to HALF_OPEN`);
+        } else {
+          score = -1000; // Heavily penalize open circuit breakers
+        }
+      }
+      
       // Penalize for timeouts (major penalty)
       const timeoutPenalty = this.timeoutCounts[i] * 30;
       score -= timeoutPenalty;
+      
+      // Penalize for consecutive errors
+      const errorPenalty = this.errorCounts[i] * 20;
+      score -= errorPenalty;
       
       // Penalize for recent use (cooldown)
       const timeSinceLastUse = now - this.lastRequestTimes[i];
@@ -326,6 +417,22 @@ class ScraperManager {
         score -= 50;
       }
       
+      // Rate limit considerations
+      const rateLimitInfo = this.rateLimitInfo[i];
+      if (rateLimitInfo.remaining <= 0) {
+        score -= 1000; // Heavy penalty for exhausted rate limits
+      } else if (rateLimitInfo.remaining < 100) {
+        score -= 20; // Penalty for low remaining requests
+      } else {
+        score += 10; // Bonus for high remaining requests
+      }
+      
+      // Penalty for recent rate limit hits
+      const timeSinceRateLimit = Date.now() - rateLimitInfo.lastRateLimitTime;
+      if (timeSinceRateLimit < this.RATE_LIMIT_COOLDOWN) {
+        score -= 50;
+      }
+      
       scraperScores.push({ index: i, score: Math.max(0, score) });
     }
     
@@ -342,11 +449,79 @@ class ScraperManager {
     
     return bestScraperIndex;
   }
+  
+  // Record success for circuit breaker
+  recordSuccess(scraperIndex) {
+    this.errorCounts[scraperIndex] = 0;
+    this.circuitBreakerStates[scraperIndex] = { state: 'CLOSED', lastFailureTime: 0 };
+  }
+  
+  // Record failure for circuit breaker
+  recordFailure(scraperIndex) {
+    this.errorCounts[scraperIndex]++;
+    const circuitBreaker = this.circuitBreakerStates[scraperIndex];
+    
+    if (this.errorCounts[scraperIndex] >= this.MAX_CONSECUTIVE_ERRORS) {
+      circuitBreaker.state = 'OPEN';
+      circuitBreaker.lastFailureTime = Date.now();
+      console.log(`🚨 Circuit breaker OPEN for scraper ${this.accountNumbers[scraperIndex]} (${this.errorCounts[scraperIndex]} consecutive errors)`);
+    }
+  }
+  
+  // Parse rate limit headers from Twitter response
+  parseRateLimitHeaders(headers, scraperIndex) {
+    const rateLimitInfo = this.rateLimitInfo[scraperIndex];
+    
+    try {
+      // Parse headers string (format: "header1: value1\nheader2: value2")
+      const headerLines = headers.split('\n');
+      const headerMap = {};
+      
+      headerLines.forEach(line => {
+        const colonIndex = line.indexOf(':');
+        if (colonIndex > 0) {
+          const key = line.substring(0, colonIndex).trim().toLowerCase();
+          const value = line.substring(colonIndex + 1).trim();
+          headerMap[key] = value;
+        }
+      });
+      
+      // Extract rate limit information
+      if (headerMap['x-rate-limit-remaining']) {
+        rateLimitInfo.remaining = parseInt(headerMap['x-rate-limit-remaining']);
+      }
+      
+      if (headerMap['x-rate-limit-limit']) {
+        rateLimitInfo.limit = parseInt(headerMap['x-rate-limit-limit']);
+      }
+      
+      if (headerMap['x-rate-limit-reset']) {
+        rateLimitInfo.resetTime = parseInt(headerMap['x-rate-limit-reset']) * 1000; // Convert to milliseconds
+      }
+      
+      rateLimitInfo.lastRateLimitTime = Date.now();
+      
+      console.log(`📊 Rate limit info for scraper ${this.accountNumbers[scraperIndex]}: ${rateLimitInfo.remaining}/${rateLimitInfo.limit} remaining, resets at ${new Date(rateLimitInfo.resetTime).toISOString()}`);
+      
+    } catch (error) {
+      console.log(`⚠ Could not parse rate limit headers for scraper ${this.accountNumbers[scraperIndex]}: ${error.message}`);
+    }
+  }
 }
 
 async function getScraper(accountNumber = 1) {
-  const scraper = new Scraper();
-  const cookiesFile = `cookies${accountNumber}.json`;
+  const scraper = new Scraper({
+    rateLimitStrategy: new ErrorRateLimitStrategy(),
+    // Add request timeout
+    fetch: (input, init) => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+      
+      return fetch(input, { ...init, signal: controller.signal })
+        .finally(() => clearTimeout(timeoutId));
+    }
+  });
+  const cookiesFile = `data/cookies/cookies${accountNumber}.json`;
   const cookies = fs.existsSync(cookiesFile) ? JSON.parse(fs.readFileSync(cookiesFile, 'utf-8')) : null;
 
   if(cookies) {
@@ -377,8 +552,12 @@ async function getScraper(accountNumber = 1) {
   return null;
 }
 
-const influencerList = fs.readFileSync('influencers.txt', 'utf-8').split('\n');
-const sinceDate = dayjs().subtract(7, 'day').format('YYYY-MM-DD');
+// Use the built-in ErrorRateLimitStrategy for production
+// This will throw errors on rate limits instead of waiting
+
+// This will be set by the main function
+let influencerList = [];
+let sinceDate = dayjs().subtract(7, 'day').format('YYYY-MM-DD');
 
 let totalInfluencerTweets = 0;
 let totalMyReplies = 0;
@@ -391,7 +570,10 @@ function sleep(ms) {
 }
 
 async function getMyReplies(scraperManager) {
-    console.log(`Getting your replies from the last 7 days...`);
+    // Calculate days from sinceDate for logging
+    const sinceDateObj = dayjs(sinceDate);
+    const daysDiff = dayjs().diff(sinceDateObj, 'day');
+    console.log(`Getting your replies from the last ${daysDiff} days (since ${sinceDate})...`);
     
     let myReplies = [];
     let attempts = 0;
@@ -400,6 +582,10 @@ async function getMyReplies(scraperManager) {
     while (attempts < maxAttempts) {
         try {
             console.log(`Attempt ${attempts + 1}/${maxAttempts} - Using scraper ${scraperManager.getCurrentAccountNumber()}`);
+            
+            // Record request in scraper manager
+            scraperManager.requestCounts[scraperManager.currentIndex]++;
+            scraperManager.lastRequestTimes[scraperManager.currentIndex] = Date.now();
             
             let replyCount = 0;
             const startTime = Date.now();
@@ -412,17 +598,17 @@ async function getMyReplies(scraperManager) {
             // Create the reply collection promise
             const replyCollectionPromise = (async () => {
                 const collectedReplies = [];
-                for await (const tweet of scraperManager.getCurrentScraper().searchTweets(`from:${myUsername} since:${sinceDate} filter:replies`, 1000, SearchMode.Latest)) {
-                    replyCount++;
-                    if (replyCount % 50 === 0) {
-                        console.log(`  Found ${replyCount} replies...`);
-                    }
+            for await (const tweet of scraperManager.getCurrentScraper().searchTweets(`from:${myUsername} since:${sinceDate} filter:replies`, 1000, SearchMode.Latest)) {
+                replyCount++;
+                if (replyCount % 50 === 0) {
+                    console.log(`  Found ${replyCount} replies...`);
+                }
                     collectedReplies.push(tweet);
-                    
+                
                     // Check if we've been stuck for too long
-                    if (replyCount % 10 === 0) {
-                        const timeSinceStart = Date.now() - startTime;
-                        if (timeSinceStart > 30000) {
+                if (replyCount % 10 === 0) {
+                    const timeSinceStart = Date.now() - startTime;
+                    if (timeSinceStart > 30000) {
                             console.log(`⚠ Request seems stuck, breaking...`);
                             break;
                         }
@@ -440,10 +626,13 @@ async function getMyReplies(scraperManager) {
         } catch (error) {
             if (error.message === 'timeout') {
                 console.log(`⚠ Timeout reached for replies, switching scraper...`);
+                // Record timeout in the scraper manager
+                scraperManager.timeoutCounts[scraperManager.currentIndex]++;
+                console.log(`Timeout recorded for scraper ${scraperManager.getCurrentAccountNumber()} (timeout #${scraperManager.timeoutCounts[scraperManager.currentIndex]})`);
                 scraperManager.switchScraper();
                 myReplies = []; // Reset replies array
             } else {
-                console.error(`✗ Error on attempt ${attempts + 1}:`, error.message);
+            console.error(`✗ Error on attempt ${attempts + 1}:`, error.message);
             }
             attempts++;
             
@@ -465,20 +654,16 @@ async function getInfluencerTweets(scraperManager) {
     const allInfluencerTweets = [];
     let totalInfluencerTweets = 0;
     let requestsSinceLastSwitch = 0;
-    const SWITCH_EVERY_N_REQUESTS = 8; // Switch scrapers every 8 influencers
+    const SWITCH_EVERY_N_REQUESTS = 15; // Switch scrapers every 15 influencers (less aggressive)
     const GLOBAL_TIMEOUT = 300000; // 5 minutes global timeout
     const globalStartTime = Date.now();
 
     for (let i = 0; i < validInfluencers.length; i++) {
-        scraperManager.switchScraper();
         await sleep(10000); 
         
-        // Global timeout check
+        // Global timeout check - only log, don't switch aggressively
         if (Date.now() - globalStartTime > GLOBAL_TIMEOUT) {
-            console.log(`⚠ Global timeout reached (${Math.round(GLOBAL_TIMEOUT/1000)}s), stopping processing`);
-            scraperManager.switchScraper();
-            await sleep(10000); // Wait 10 seconds after switching
-
+            console.log(`⚠ Global timeout reached (${Math.round(GLOBAL_TIMEOUT/1000)}s), continuing with current scraper`);
         }
         
         const influencer = validInfluencers[i];
@@ -508,6 +693,9 @@ async function getInfluencerTweets(scraperManager) {
             try {
                 console.log(`  Attempt ${attempts + 1}/${maxAttempts} - Using scraper ${scraperManager.getCurrentAccountNumber()}`);
                 
+                scraperManager.requestCounts[scraperManager.currentIndex]++;
+                scraperManager.lastRequestTimes[scraperManager.currentIndex] = Date.now();
+                
                 const startTime = Date.now();
                 let lastTweetTime = Date.now();
                 let tweetCount = 0;
@@ -520,21 +708,21 @@ async function getInfluencerTweets(scraperManager) {
                 // Create the tweet collection promise
                 const tweetCollectionPromise = (async () => {
                     const collectedTweets = [];
-                    for await (const tweet of scraperManager.getCurrentScraper().searchTweets(`from:${influencer} since:${sinceDate}`, 200, SearchMode.Latest)) {
-                        tweetCount++;
-                        lastTweetTime = Date.now();
-                        
-                        if (tweetCount % 50 === 0) {
-                            console.log(`    Found ${tweetCount} tweets for ${influencer}...`);
-                        }
+                    for await (const tweet of scraperManager.getCurrentScraper().searchTweets(`from:${influencer} since:${sinceDate}`, 350, SearchMode.Latest)) {
+                    tweetCount++;
+                    lastTweetTime = Date.now();
+                    
+                    if (tweetCount % 50 === 0) {
+                        console.log(`    Found ${tweetCount} tweets for ${influencer}...`);
+                    }
                         collectedTweets.push(tweet);
-                        
+                    
                         // Check if we've been stuck for too long
-                        if (tweetCount % 5 === 0) {
-                            const timeSinceLastTweet = Date.now() - lastTweetTime;
-                            const totalTime = Date.now() - startTime;
-                            
-                            if (timeSinceLastTweet > 15000 || totalTime > 30000) {
+                    if (tweetCount % 5 === 0) {
+                        const timeSinceLastTweet = Date.now() - lastTweetTime;
+                        const totalTime = Date.now() - startTime;
+                        
+                        if (timeSinceLastTweet > 15000 || totalTime > 30000) {
                                 console.log(`    ⚠ Request seems stuck (${Math.round(timeSinceLastTweet/1000)}s since last tweet), breaking...`);
                                 break;
                             }
@@ -552,17 +740,19 @@ async function getInfluencerTweets(scraperManager) {
             } catch (error) {
                 if (error.message === 'timeout') {
                     console.log(`    ⚠ Timeout reached for ${influencer}, switching scraper...`);
+                    // Record timeout in the scraper manager
+                    scraperManager.timeoutCounts[scraperManager.currentIndex]++;
+                    console.log(`    Timeout recorded for scraper ${scraperManager.getCurrentAccountNumber()} (timeout #${scraperManager.timeoutCounts[scraperManager.currentIndex]})`);
                     scraperManager.switchScraper();
                     requestsSinceLastSwitch = 0;
                     tweets = []; // Reset tweets array
                 } else {
-                    console.error(`✗ Error on attempt ${attempts + 1} for ${influencer}:`, error.message);
+                console.error(`✗ Error on attempt ${attempts + 1} for ${influencer}:`, error.message);
                 }
                 attempts++;
                 
                 if (attempts < maxAttempts) {
-                    console.log(`  Switching scraper and retrying...`);
-                    scraperManager.switchScraper();
+                    console.log(`  Retrying with current scraper...`);
                     requestsSinceLastSwitch = 0;
                     await sleep(15000); // Wait 15 seconds before retry (longer delay)
                 }
@@ -667,14 +857,39 @@ function findUnrepliedTweets(influencerTweets, myReplies) {
     });
 }
 
-async function main() {
-    const username = process.argv[2];
+async function main(username = null, influencers = null, days = 7, processId = null) {
+    if (!username) {
+        username = process.argv[2];
+    }
     myUsername = username;
     if(!myUsername) {
         console.log('Please provide a username as an argument');
         process.exit(1);
     }
-    console.log(`Analyzing ${myUsername}...`);
+    
+    // Generate process ID if not provided
+    if (!processId) {
+        processId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+    }
+    
+    // Set influencers list
+    if (influencers) {
+        influencerList = influencers;
+    } else {
+        // Fallback to reading from file if no influencers provided
+        try {
+            influencerList = fs.readFileSync('influencers.txt', 'utf-8').split('\n');
+        } catch (error) {
+            console.log('No influencers file found and no influencers provided');
+            process.exit(1);
+        }
+    }
+    
+    // Set since date based on days parameter
+    sinceDate = dayjs().subtract(days, 'day').format('YYYY-MM-DD');
+    
+    console.log(`Analyzing ${myUsername} with ${influencerList.length} influencers for the last ${days} days (since ${sinceDate})...`);
+    console.log(`Process ID: ${processId}`);
     
     const scraperManager = new ScraperManager(); // Let it auto-detect from .env
     await scraperManager.initialize();
@@ -696,8 +911,8 @@ async function main() {
     allData.my_replies = myReplies;
     
     // Save intermediate results
-    fs.writeFileSync(`${myUsername}_my_replies.json`, JSON.stringify(myReplies, null, 2));
-    console.log(`✓ Saved your replies to ${myUsername}_my_replies.json`);
+    fs.writeFileSync(`data/tweets/${myUsername}_${processId}_my_replies.json`, JSON.stringify(myReplies, null, 2));
+    console.log(`✓ Saved your replies to data/tweets/${myUsername}_${processId}_my_replies.json`);
     
     // Get influencer tweets
     console.log('\n=== STEP 2: Getting influencer tweets ===');
@@ -722,8 +937,8 @@ async function main() {
     allData.influencer_tweets = optimizedInfluencerTweets;
     
     // Save intermediate results
-    fs.writeFileSync(`${myUsername}_influencer_tweets.json`, JSON.stringify(optimizedInfluencerTweets, null, 2));
-    console.log(`✓ Saved influencer tweets to ${myUsername}_influencer_tweets.json`);
+    fs.writeFileSync(`data/tweets/${myUsername}_${processId}_influencer_tweets.json`, JSON.stringify(optimizedInfluencerTweets, null, 2));
+    console.log(`✓ Saved influencer tweets to data/tweets/${myUsername}_${processId}_influencer_tweets.json`);
     
     // Run analysis
     console.log('\n=== STEP 3: Running analysis ===');
@@ -745,7 +960,7 @@ async function main() {
             csvContent += `"${item.influencer}",${item.total_tweets},${item.replies},${item.unreplied_count},${avgReplyTime},"${mentions}",${item.reply_rate}\n`;
         });
     
-    fs.writeFileSync(`${myUsername}_influencer_analysis.csv`, csvContent);
+    fs.writeFileSync(`data/csv/${myUsername}_${processId}_influencer_analysis.csv`, csvContent);
     
     // Create separate file for unreplied tweets
     const allUnrepliedTweets = [];
@@ -758,7 +973,7 @@ async function main() {
         });
     });
     
-    fs.writeFileSync(`${myUsername}_unreplied_tweets.json`, JSON.stringify(allUnrepliedTweets, null, 2));
+    fs.writeFileSync(`data/tweets/${myUsername}_${processId}_unreplied_tweets.json`, JSON.stringify(allUnrepliedTweets, null, 2));
     
     // Save comprehensive JSON (optimized)
     const results = {
@@ -768,12 +983,13 @@ async function main() {
             total_replies_made: unrepliedTweets.reduce((sum, item) => sum + item.replies, 0),
             total_unreplied_tweets: unrepliedTweets.reduce((sum, item) => sum + item.unreplied_count, 0),
             influencers_analyzed: unrepliedTweets.length,
-            analysis_date: new Date().toISOString()
+            analysis_date: new Date().toISOString(),
+            process_id: processId
         },
         all_data: allData
     };
     
-    fs.writeFileSync(`${myUsername}_complete_analysis.json`, JSON.stringify(results, null, 2));
+    fs.writeFileSync(`data/analysis/${myUsername}_${processId}_complete_analysis.json`, JSON.stringify(results, null, 2));
     
     console.log(`\n=== ANALYSIS COMPLETE ===`);
     console.log(`Total influencer tweets: ${totalInfluencerTweets}`);
@@ -781,11 +997,11 @@ async function main() {
     console.log(`Total unreplied tweets: ${results.summary.total_unreplied_tweets}`);
     console.log(`Influencers analyzed: ${unrepliedTweets.length}`);
     console.log(`\nFiles created:`);
-    console.log(`- ${myUsername}_my_replies.json`);
-    console.log(`- ${myUsername}_influencer_tweets.json`);
-    console.log(`- ${myUsername}_influencer_analysis.csv`);
-    console.log(`- ${myUsername}_unreplied_tweets.json`);
-    console.log(`- ${myUsername}_complete_analysis.json`);
+    console.log(`- data/tweets/${myUsername}_${processId}_my_replies.json`);
+    console.log(`- data/tweets/${myUsername}_${processId}_influencer_tweets.json`);
+    console.log(`- data/csv/${myUsername}_${processId}_influencer_analysis.csv`);
+    console.log(`- data/tweets/${myUsername}_${processId}_unreplied_tweets.json`);
+    console.log(`- data/analysis/${myUsername}_${processId}_complete_analysis.json`);
     
     // Show top 5 influencers as preview
     console.log(`\n=== TOP 5 INFLUENCERS (PREVIEW) ===`);
@@ -796,12 +1012,14 @@ async function main() {
             console.log(`${index + 1}. ${item.influencer}: ${item.replies} replies, ${item.unreplied_count} unreplied (${item.reply_rate} rate)`);
         });
 
+    
+
     // Cleanup: Close all scrapers
     console.log('\n=== CLEANING UP ===');
     try {
         for (let i = 0; i < scraperManager.scrapers.length; i++) {
             console.log(`Closing scraper ${scraperManager.accountNumbers[i]}...`);
-            await scraperManager.scrapers[i].close();
+            await scraperManager.scrapers[i].logout();
         }
         console.log('✓ All scrapers closed successfully');
     } catch (error) {
@@ -809,7 +1027,20 @@ async function main() {
     }
 
     console.log('\n=== SCRIPT COMPLETE ===');
-    process.exit(0);
+    
+    // Return results for API
+    return {
+        analysisFile: `${myUsername}_${processId}_complete_analysis.json`,
+        unrepliedFile: `${myUsername}_${processId}_unreplied_tweets.json`,
+        csvFile: `${myUsername}_${processId}_influencer_analysis.csv`,
+        stats: results.summary
+    };
 }
 
+// Export for API server
+export { main };
+
+// Only run if called directly (not imported)
+if (import.meta.url === `file://${process.argv[1]}`) {
 main(); 
+} 

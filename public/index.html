@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Twitter Scraper</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-size: 1.1em;
+        }
+
+        .content {
+            padding: 40px;
+        }
+
+        .form-group {
+            margin-bottom: 25px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        input[type="text"], input[type="file"] {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e1e5e9;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: border-color 0.3s ease;
+        }
+
+        input[type="text"]:focus, input[type="file"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s ease;
+            width: 100%;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .status {
+            margin-top: 30px;
+            padding: 20px;
+            border-radius: 8px;
+            display: none;
+        }
+
+        .status.running {
+            background: #e3f2fd;
+            border: 1px solid #2196f3;
+            color: #1976d2;
+        }
+
+        .status.completed {
+            background: #e8f5e8;
+            border: 1px solid #4caf50;
+            color: #2e7d32;
+        }
+
+        .status.error {
+            background: #ffebee;
+            border: 1px solid #f44336;
+            color: #c62828;
+        }
+
+        .logs {
+            background: #1e1e1e;
+            color: #00ff00;
+            padding: 20px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            margin-top: 20px;
+            display: none;
+        }
+
+        .logs-container {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .downloads {
+            margin-top: 30px;
+            display: none;
+        }
+
+        .download-btn {
+            display: inline-block;
+            background: #4caf50;
+            color: white;
+            text-decoration: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            margin: 5px;
+            transition: background 0.3s ease;
+        }
+
+        .download-btn:hover {
+            background: #45a049;
+        }
+
+        .progress {
+            width: 100%;
+            height: 6px;
+            background: #e1e5e9;
+            border-radius: 3px;
+            margin: 20px 0;
+            overflow: hidden;
+            display: none;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .file-info {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 15px;
+            font-size: 14px;
+            color: #666;
+        }
+
+        .file-info strong {
+            color: #333;
+        }
+
+        .recent-jobs {
+            margin-bottom: 30px;
+        }
+
+        .jobs-list {
+            margin: 20px 0;
+        }
+
+        .job-item {
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 10px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .job-item:hover {
+            background: #e9ecef;
+            transform: translateY(-2px);
+        }
+
+        .job-item.completed {
+            border-left: 4px solid #28a745;
+        }
+
+        .job-item.running {
+            border-left: 4px solid #007bff;
+        }
+
+        .job-item.failed {
+            border-left: 4px solid #dc3545;
+        }
+
+        .job-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .job-title {
+            font-weight: 600;
+            color: #333;
+        }
+
+        .job-status {
+            font-size: 12px;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-weight: 500;
+        }
+
+        .job-status.completed {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .job-status.running {
+            background: #d1ecf1;
+            color: #0c5460;
+        }
+
+        .job-status.failed {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .job-details {
+            font-size: 14px;
+            color: #666;
+        }
+
+        .job-actions {
+            margin-top: 10px;
+        }
+
+        .job-action-btn {
+            background: #6c757d;
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            margin-right: 8px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+        }
+
+        .job-action-btn:hover {
+            background: #5a6268;
+        }
+
+        .btn-secondary {
+            background: #6c757d;
+            margin-top: 15px;
+        }
+
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+
+        .no-jobs {
+            text-align: center;
+            color: #666;
+            font-style: italic;
+            padding: 20px;
+        }
+
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 2px 0;
+        }
+
+        .log-timestamp {
+            color: #888;
+            font-size: 12px;
+            margin-right: 8px;
+        }
+
+        .log-message {
+            color: #00ff00;
+        }
+
+        .logs-container {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .tab-warning {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: #ff6b6b;
+            color: white;
+            padding: 10px;
+            text-align: center;
+            z-index: 1000;
+            display: none;
+        }
+
+        .tab-warning.show {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="tab-warning" id="tabWarning">
+        ⚠️ Scraping job in progress! Please don't close this tab.
+    </div>
+    
+    <div class="container">
+        <div class="header">
+            <h1>🐦 Twitter Scraper</h1>
+            <p>Analyze your Twitter engagement with influencers</p>
+        </div>
+
+        <div class="content">
+            <!-- Recent Jobs Section -->
+            <div class="recent-jobs" id="recentJobs" style="display: none;">
+                <h3>📋 Recent Jobs</h3>
+                <div class="jobs-list" id="jobsList"></div>
+                <button class="btn btn-secondary" onclick="showNewJobForm()">➕ Start New Job</button>
+            </div>
+
+            <!-- New Job Form -->
+            <div id="newJobForm">
+                <form id="scrapeForm">
+                <div class="form-group">
+                    <label for="username">Your Twitter Username:</label>
+                    <input type="text" id="username" name="username" placeholder="Enter your Twitter username (without @)" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="influencersFile">Influencers File (influencers.txt):</label>
+                    <input type="file" id="influencersFile" name="influencersFile" accept=".txt" required>
+                    <div class="file-info">
+                        <strong>File format:</strong> One influencer username per line<br>
+                        <strong>Example:</strong><br>
+                        <code>elonmusk<br>BillGates<br>tim_cook</code>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="daysBack">Number of Days to Analyze:</label>
+                    <input type="number" id="daysBack" name="daysBack" min="1" max="365" value="7" required>
+                    <div class="file-info">
+                        <strong>How far back to look:</strong> Enter the number of days to analyze (1-365)<br>
+                        <strong>Default:</strong> 7 days (last week)
+                    </div>
+                </div>
+
+                <button type="submit" class="btn" id="submitBtn">Start Scraping</button>
+            </form>
+
+            <div class="progress" id="progress">
+                <div class="progress-bar" id="progressBar"></div>
+            </div>
+
+            <div class="status" id="status"></div>
+
+            <div class="logs" id="logs">
+                <div class="logs-container" id="logsContainer"></div>
+            </div>
+
+            <div class="downloads" id="downloads">
+                <h3>📁 Download Results</h3>
+                <a href="#" class="download-btn" id="downloadCsv">📊 Download CSV</a>
+                <a href="#" class="download-btn" id="downloadJson">📄 Download JSON</a>
+                <a href="#" class="download-btn" id="downloadUnreplied">🚫 Unreplied Tweets</a>
+                <button class="btn btn-secondary" onclick="clearUIState()" style="margin-top: 15px;">🔄 Start New Job</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentJobId = null;
+        let logInterval = null;
+        let savedJobs = [];
+        let socket = null;
+        let isJobRunning = false;
+
+        // Initialize Socket.IO
+        function initSocket() {
+            socket = io();
+            
+            socket.on('connect', () => {
+                console.log('Connected to server');
+            });
+            
+            socket.on('log', (data) => {
+                addLog(data.message, data.timestamp);
+            });
+            
+            socket.on('jobComplete', (data) => {
+                hideTabWarning();
+                isJobRunning = false;
+                document.getElementById('status').className = 'status completed';
+                document.getElementById('status').textContent = 'Scraping completed successfully!';
+                document.getElementById('progressBar').style.width = '100%';
+                document.getElementById('submitBtn').disabled = false;
+                
+                if (data.results) {
+                    showDownloads(data.results);
+                    updateJob(currentJobId, {
+                        status: 'completed',
+                        progress: 'Completed successfully!',
+                        results: data.results
+                    });
+                }
+            });
+            
+            socket.on('jobFailed', (data) => {
+                hideTabWarning();
+                isJobRunning = false;
+                document.getElementById('status').className = 'status error';
+                document.getElementById('status').textContent = 'Scraping failed: ' + data.error;
+                document.getElementById('submitBtn').disabled = false;
+                document.getElementById('progress').style.display = 'none';
+                
+                updateJob(currentJobId, {
+                    status: 'failed',
+                    progress: 'Failed: ' + data.error
+                });
+            });
+        }
+
+        // Show tab warning
+        function showTabWarning() {
+            document.getElementById('tabWarning').classList.add('show');
+        }
+
+        // Hide tab warning
+        function hideTabWarning() {
+            document.getElementById('tabWarning').classList.remove('show');
+        }
+
+        // Prevent tab close during job
+        window.addEventListener('beforeunload', function(e) {
+            if (isJobRunning) {
+                e.preventDefault();
+                e.returnValue = 'Scraping job in progress! Are you sure you want to leave?';
+                return e.returnValue;
+            }
+        });
+
+        // Load saved jobs on page load
+        window.addEventListener('load', function() {
+            initSocket();
+            loadSavedJobs();
+            checkForRecentJobs();
+        });
+
+        // Save jobs to localStorage
+        function saveJobs() {
+            localStorage.setItem('twitterScraperJobs', JSON.stringify(savedJobs));
+        }
+
+        // Load jobs from localStorage
+        function loadSavedJobs() {
+            const saved = localStorage.getItem('twitterScraperJobs');
+            if (saved) {
+                savedJobs = JSON.parse(saved);
+            }
+        }
+
+        // Check if there are recent jobs to show
+        function checkForRecentJobs() {
+            if (savedJobs.length > 0) {
+                showRecentJobs();
+            }
+        }
+
+        // Show recent jobs section
+        function showRecentJobs() {
+            document.getElementById('recentJobs').style.display = 'block';
+            document.getElementById('newJobForm').style.display = 'none';
+            renderJobsList();
+        }
+
+        // Clear UI state
+        function clearUIState() {
+            document.getElementById('status').style.display = 'none';
+            document.getElementById('progress').style.display = 'none';
+            document.getElementById('logs').style.display = 'none';
+            document.getElementById('downloads').style.display = 'none';
+            document.getElementById('logsContainer').innerHTML = '';
+            document.getElementById('progressBar').style.width = '0%';
+            document.getElementById('submitBtn').disabled = false;
+            currentJobId = null;
+            isJobRunning = false;
+        }
+
+        // Show new job form
+        function showNewJobForm() {
+            document.getElementById('recentJobs').style.display = 'none';
+            document.getElementById('newJobForm').style.display = 'block';
+            clearUIState(); // Clear any previous job state
+        }
+
+        // Render jobs list
+        function renderJobsList() {
+            const jobsList = document.getElementById('jobsList');
+            
+            if (savedJobs.length === 0) {
+                jobsList.innerHTML = '<div class="no-jobs">No recent jobs found</div>';
+                return;
+            }
+
+            jobsList.innerHTML = savedJobs
+                .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+                .map(job => `
+                    <div class="job-item ${job.status}" onclick="loadJob('${job.id}')">
+                        <div class="job-header">
+                            <div class="job-title">@${job.username}</div>
+                            <div class="job-status ${job.status}">${job.status}</div>
+                        </div>
+                        <div class="job-details">
+                            ${job.influencers ? `${job.influencers} influencers` : ''}
+                            ${job.daysBack ? `• ${job.daysBack} days` : ''}
+                            ${job.timestamp ? `• ${new Date(job.timestamp).toLocaleString()}` : ''}
+                            ${job.progress ? `• ${job.progress}` : ''}
+                        </div>
+                        ${job.status === 'completed' ? `
+                            <div class="job-actions">
+                                <a href="/download/${job.results?.csvFile}" class="job-action-btn">📊 CSV</a>
+                                <a href="/download/${job.results?.analysisFile}" class="job-action-btn">📄 JSON</a>
+                                <a href="/download/${job.results?.unrepliedFile}" class="job-action-btn">🚫 Unreplied</a>
+                            </div>
+                        ` : ''}
+                    </div>
+                `).join('');
+        }
+
+        // Load a specific job
+        function loadJob(jobId) {
+            const job = savedJobs.find(j => j.id === jobId);
+            if (!job) return;
+
+            currentJobId = jobId;
+            
+            if (job.status === 'completed') {
+                // Show completed job results
+                document.getElementById('status').style.display = 'block';
+                document.getElementById('status').className = 'status completed';
+                document.getElementById('status').textContent = 'Job completed successfully!';
+                
+                if (job.results) {
+                    showDownloads(job.results);
+                }
+            } else if (job.status === 'running') {
+                // Resume monitoring if still running
+                document.getElementById('status').style.display = 'block';
+                document.getElementById('status').className = 'status running';
+                document.getElementById('status').textContent = 'Resuming job monitoring...';
+                pollStatus();
+            }
+        }
+
+        // Add job to saved jobs
+        function addJob(jobData) {
+            const existingIndex = savedJobs.findIndex(j => j.id === jobData.id);
+            if (existingIndex >= 0) {
+                savedJobs[existingIndex] = { ...savedJobs[existingIndex], ...jobData };
+            } else {
+                savedJobs.push(jobData);
+            }
+            saveJobs();
+            renderJobsList();
+        }
+
+        // Update job in saved jobs
+        function updateJob(jobId, updates) {
+            const jobIndex = savedJobs.findIndex(j => j.id === jobId);
+            if (jobIndex >= 0) {
+                savedJobs[jobIndex] = { ...savedJobs[jobIndex], ...updates };
+                saveJobs();
+                renderJobsList();
+            }
+        }
+
+        document.getElementById('scrapeForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const username = document.getElementById('username').value.trim();
+            const fileInput = document.getElementById('influencersFile');
+            const daysBack = parseInt(document.getElementById('daysBack').value);
+            
+            if (!username || !fileInput.files[0]) {
+                alert('Please provide both username and influencers file');
+                return;
+            }
+
+            if (daysBack < 1 || daysBack > 365) {
+                alert('Please enter a valid number of days (1-365)');
+                return;
+            }
+
+            // Show progress and status
+            document.getElementById('progress').style.display = 'block';
+            document.getElementById('status').style.display = 'block';
+            document.getElementById('status').className = 'status running';
+            document.getElementById('status').textContent = 'Starting scraping job...';
+            document.getElementById('submitBtn').disabled = true;
+            document.getElementById('logs').style.display = 'block';
+            document.getElementById('downloads').style.display = 'none';
+            
+            // Clear previous logs and reset UI state
+            document.getElementById('logsContainer').innerHTML = '';
+            document.getElementById('progressBar').style.width = '0%';
+            currentJobId = null;
+            isJobRunning = true;
+
+            // Show tab warning
+            showTabWarning();
+
+            // Create FormData
+            const formData = new FormData();
+            formData.append('username', username);
+            formData.append('influencersFile', fileInput.files[0]);
+            formData.append('daysBack', daysBack);
+
+            try {
+                // Start scraping
+                const response = await fetch('/scrape', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    currentJobId = data.jobId;
+                    document.getElementById('status').textContent = 'Scraping job started! Monitoring progress...';
+                    
+                    // Join Socket.IO room for this job
+                    socket.emit('joinJob', data.jobId);
+                    
+                    // Save job to localStorage
+                    const jobData = {
+                        id: data.jobId,
+                        username: username,
+                        status: 'running',
+                        timestamp: new Date().toISOString(),
+                        progress: 'Starting...',
+                        influencers: null, // Will be updated when we get file info
+                        daysBack: daysBack
+                    };
+                    addJob(jobData);
+                    
+                    // Start polling for status (fallback)
+                    pollStatus();
+                } else {
+                    throw new Error(data.error || 'Failed to start scraping');
+                }
+            } catch (error) {
+                document.getElementById('status').className = 'status error';
+                document.getElementById('status').textContent = 'Error: ' + error.message;
+                document.getElementById('submitBtn').disabled = false;
+                document.getElementById('progress').style.display = 'none';
+            }
+        });
+
+        async function pollStatus() {
+            if (!currentJobId) return;
+
+            try {
+                const response = await fetch(`/status/${currentJobId}`);
+                const data = await response.json();
+
+                if (data.status === 'running') {
+                    document.getElementById('status').textContent = data.progress || 'Running...';
+                    updateProgress(data.progress);
+                    
+                    // Update job in localStorage
+                    updateJob(currentJobId, {
+                        status: 'running',
+                        progress: data.progress || 'Running...',
+                        influencers: data.influencers || null
+                    });
+                    
+                    // Continue polling
+                    setTimeout(pollStatus, 2000);
+                } else if (data.status === 'completed') {
+                    document.getElementById('status').className = 'status completed';
+                    document.getElementById('status').textContent = 'Scraping completed successfully!';
+                    document.getElementById('progressBar').style.width = '100%';
+                    document.getElementById('submitBtn').disabled = false;
+                    
+                    // Update job in localStorage
+                    updateJob(currentJobId, {
+                        status: 'completed',
+                        progress: 'Completed successfully!',
+                        results: data.results
+                    });
+                    
+                    // Show download links
+                    showDownloads(data.results);
+                } else if (data.status === 'failed') {
+                    document.getElementById('status').className = 'status error';
+                    document.getElementById('status').textContent = 'Scraping failed: ' + data.error;
+                    document.getElementById('submitBtn').disabled = false;
+                    document.getElementById('progress').style.display = 'none';
+                    
+                    // Update job in localStorage
+                    updateJob(currentJobId, {
+                        status: 'failed',
+                        progress: 'Failed: ' + data.error
+                    });
+                }
+            } catch (error) {
+                console.error('Error polling status:', error);
+                setTimeout(pollStatus, 5000); // Retry after 5 seconds
+            }
+        }
+
+        function updateProgress(progress) {
+            // Extract percentage from progress text
+            const progressMatch = progress.match(/(\d+)%/);
+            if (progressMatch) {
+                const percentage = parseInt(progressMatch[1]);
+                document.getElementById('progressBar').style.width = percentage + '%';
+            }
+        }
+
+        function showDownloads(results) {
+            const downloads = document.getElementById('downloads');
+            downloads.style.display = 'block';
+
+            // Set download links
+            if (results.csvFile) {
+                document.getElementById('downloadCsv').href = `/download/${results.csvFile}`;
+            }
+            if (results.analysisFile) {
+                document.getElementById('downloadJson').href = `/download/${results.analysisFile}`;
+            }
+            if (results.unrepliedFile) {
+                document.getElementById('downloadUnreplied').href = `/download/${results.unrepliedFile}`;
+            }
+        }
+
+        // Add real-time logs
+        function addLog(message, timestamp = null) {
+            const logsContainer = document.getElementById('logsContainer');
+            const time = timestamp ? new Date(timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
+            
+            const logEntry = document.createElement('div');
+            logEntry.className = 'log-entry';
+            logEntry.innerHTML = `
+                <span class="log-timestamp">[${time}]</span>
+                <span class="log-message">${message}</span>
+            `;
+            
+            logsContainer.appendChild(logEntry);
+            logsContainer.scrollTop = logsContainer.scrollHeight;
+        }
+    </script>
+</body>
+</html> 
