@@ -452,6 +452,9 @@ async function scrapeInBackground(username, jobId, days, processId) {
     io.to(jobId).emit('jobComplete', { results });
     console.log(`✅ Scrape job completed for ${username} (ID: ${jobId})`);
     
+    // Immediately remove completed job from activeJobs
+    activeJobs.delete(username);
+    
   } catch (error) {
     console.error(`❌ Scrape job failed for ${username} (ID: ${jobId}):`, error.message);
     
@@ -463,17 +466,10 @@ async function scrapeInBackground(username, jobId, days, processId) {
     job.duration = new Date(job.endTime) - new Date(job.startTime);
     
     io.to(jobId).emit('jobFailed', { error: error.message });
+    
+    // Immediately remove failed job from activeJobs
+    activeJobs.delete(username);
   }
-  
-  // Clean up job after 1 hour
-  setTimeout(() => {
-    const jobIndex = Array.from(activeJobs.values()).findIndex(j => j.id === jobId);
-    if (jobIndex !== -1) {
-      const jobToDelete = Array.from(activeJobs.values())[jobIndex];
-      activeJobs.delete(jobToDelete.username);
-    }
-    console.log(`🧹 Cleaned up job ${jobId}`);
-  }, 60 * 60 * 1000);
 }
 
 // Serve the main HTML interface

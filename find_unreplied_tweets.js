@@ -1013,19 +1013,6 @@ async function main(username = null, influencers = null, days = 7, processId = n
         });
 
     
-
-    // Cleanup: Close all scrapers
-    console.log('\n=== CLEANING UP ===');
-    try {
-        for (let i = 0; i < scraperManager.scrapers.length; i++) {
-            console.log(`Closing scraper ${scraperManager.accountNumbers[i]}...`);
-            await scraperManager.scrapers[i].logout();
-        }
-        console.log('✓ All scrapers closed successfully');
-    } catch (error) {
-        console.error('Error during cleanup:', error.message);
-    }
-
     console.log('\n=== SCRIPT COMPLETE ===');
     
     // Return results for API
