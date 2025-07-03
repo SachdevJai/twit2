@@ -39,7 +39,7 @@ const activeJobs = new Map();
 // Jobs storage file
 const JOBS_FILE = 'data/jobs.json';
 
-// Initialize all required directories
+// Initialize required directories and files
 function initializeDirectories() {
   const directories = [
     'data',
@@ -52,15 +52,20 @@ function initializeDirectories() {
   
   directories.forEach(dir => {
     if (!fs.existsSync(dir)) {
-      try {
-        fs.mkdirSync(dir, { recursive: true });
-        console.log(`✅ Created directory: ${dir}`);
-      } catch (error) {
-        console.error(`❌ Failed to create directory ${dir}:`, error.message);
-      }
+      fs.mkdirSync(dir, { recursive: true });
+      console.log(`✅ Created directory: ${dir}`);
     }
   });
+  
+  // Initialize jobs file if it doesn't exist
+  if (!fs.existsSync(JOBS_FILE)) {
+    saveJobsToFile([]);
+    console.log(`✅ Initialized jobs file: ${JOBS_FILE}`);
+  }
 }
+
+// Initialize on startup
+initializeDirectories();
 
 // Load jobs from file
 function loadJobsFromFile() {
@@ -78,12 +83,8 @@ function loadJobsFromFile() {
 // Save jobs to file
 function saveJobsToFile(jobs) {
   try {
-    // Ensure data directory exists before saving
-    if (!fs.existsSync('data')) {
-      fs.mkdirSync('data', { recursive: true });
-    }
     fs.writeFileSync(JOBS_FILE, JSON.stringify(jobs, null, 2));
-  } catch (error) {
+    } catch (error) {
     console.error('Error saving jobs file:', error);
   }
 }
@@ -102,99 +103,94 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Scrape endpoint
-app.post('/scrape', upload.single('influencers'), async (req, res) => {
+// Scrape endpoint with file upload
+app.post('/scrape', upload.single('influencersFile'), async (req, res) => {
+  const { username, daysBack } = req.body;
+  const influencersFile = req.file;
+  
+  if (!username) {
+    return res.status(400).json({ 
+      error: 'Username is required'
+    });
+  }
+
+  if (!influencersFile) {
+    return res.status(400).json({ 
+      error: 'Influencers file is required'
+    });
+  }
+
+  // Validate days parameter
+  const days = parseInt(daysBack) || 7;
+  if (days < 1 || days > 365) {
+    return res.status(400).json({ 
+      error: 'Days must be between 1 and 365'
+    });
+  }
+
+  // Validate file content
+  let influencers = [];
   try {
-    // Ensure all directories exist before starting
-    initializeDirectories();
-    
-    const { username, days } = req.body;
-    const influencersFile = req.file;
-    
-    if (!username || !influencersFile) {
-      return res.status(400).json({ 
-        error: 'Missing required fields',
-        required: ['username', 'influencers file'],
-        received: { username: !!username, file: !!influencersFile }
-      });
-    }
-    
-    const daysToAnalyze = parseInt(days) || 30;
-    
-    // Read influencers from file
-    const influencersContent = fs.readFileSync(influencersFile.path, 'utf-8');
-    const influencers = influencersContent
-      .split('\n')
+    const fileContent = fs.readFileSync(influencersFile.path, 'utf-8');
+    influencers = fileContent.split('\n')
       .map(line => line.trim())
-      .filter(line => line && !line.startsWith('#'))
-      .slice(0, 50); // Limit to 50 influencers
+      .filter(line => line.length > 0);
     
     if (influencers.length === 0) {
       return res.status(400).json({ 
-        error: 'No valid influencers found in file',
-        fileContent: influencersContent.substring(0, 200) + '...'
+        error: 'Influencers file is empty or contains no valid usernames'
       });
     }
     
-    // Generate unique job ID
-    const jobId = `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
-    // Create job object
-    const job = {
-      id: jobId,
-      username,
-      influencers: influencers,
-      daysToAnalyze,
-      status: 'starting',
-      timestamp: new Date().toISOString(),
-      progress: {
-        current: 0,
-        total: influencers.length,
-        currentInfluencer: '',
-        phase: 'initializing'
-      },
-      stats: {
-        totalTweets: 0,
-        totalReplies: 0,
-        totalUnreplied: 0,
-        timeouts: 0,
-        errors: 0
-      },
-      files: []
-    };
-    
-    // Save job to file
-    const jobs = loadJobsFromFile();
-    jobs.push(job);
-    saveJobsToFile(jobs);
-    
-    // Store in active jobs
-    activeJobs.set(jobId, {
-      ...job,
-      abortController: new AbortController()
-    });
-    
-    console.log(`🚀 Starting new scraping job: ${jobId}`);
-    console.log(`👤 Username: ${username}`);
-    console.log(`📊 Days to analyze: ${daysToAnalyze}`);
-    console.log(`👥 Influencers: ${influencers.length}`);
-    
-    // Start scraping in background
-    startScrapingJob(jobId, username, influencers, daysToAnalyze);
-    
-    res.json({
-      message: 'Scraping job started successfully',
-      jobId: jobId,
-      job: job
-    });
-    
+    console.log(`Validated ${influencers.length} influencers from uploaded file`);
   } catch (error) {
-    console.error('❌ Error starting scraping job:', error);
-    res.status(500).json({ 
-      error: 'Failed to start scraping job',
-      details: error.message
+    return res.status(400).json({ 
+      error: 'Failed to read influencers file: ' + error.message
     });
   }
+
+  // Check if job is already running for this username
+  if (activeJobs.has(username)) {
+    return res.status(409).json({ 
+      error: 'Scraping job already in progress for this username',
+      username: username
+    });
+  }
+
+  // Create job ID
+  const jobId = `${username}_${Date.now()}`;
+  const processId = generateProcessId(); // Generate unique process ID
+  const jobStatus = {
+    id: jobId,
+    username: username,
+    processId: processId, // Store process ID
+    status: 'running',
+    startTime: new Date().toISOString(),
+    progress: 'Initializing...',
+    results: null,
+    error: null,
+    influencersFile: influencersFile.path,
+    influencers: influencers.length,
+    daysBack: days
+  };
+
+  activeJobs.set(username, jobStatus);
+
+  console.log(`🚀 Starting scrape job for ${username} (ID: ${jobId})`);
+
+  // Start scraping in background
+  scrapeInBackground(username, jobId, days, processId);
+
+  // Return job info immediately
+  res.json({
+    message: 'Scraping job started',
+    jobId: jobId,
+    username: username,
+    processId: processId,
+    status: 'running',
+    checkStatus: `/status/${jobId}`,
+    results: `/results/${jobId}`
+  });
 });
 
 // Status endpoint
@@ -264,7 +260,7 @@ app.get('/download/*', (req, res) => {
     // File is already in the correct path format
     filePath = path.join(__dirname, filename);
     console.log(`📁 Using direct path: ${filePath}`);
-  } else {
+    } else {
     // New approach: determine directory based on file extension/name
     let searchDir = '';
     if (filename.endsWith('_complete_analysis.json')) {
@@ -291,14 +287,7 @@ app.get('/download/*', (req, res) => {
       ];
       
       console.log(`🔍 Searching in paths:`, possiblePaths);
-      filePath = possiblePaths.find(p => {
-        try {
-          return fs.existsSync(p);
-        } catch (error) {
-          console.error(`Error checking path ${p}:`, error.message);
-          return false;
-        }
-      });
+      filePath = possiblePaths.find(p => fs.existsSync(p));
       
       if (!filePath) {
         console.log(`❌ File not found in any path`);
@@ -312,26 +301,17 @@ app.get('/download/*', (req, res) => {
     }
   }
   
-  try {
-    if (!fs.existsSync(filePath)) {
-      console.log(`❌ File does not exist at: ${filePath}`);
-      return res.status(404).json({ 
-        error: 'File not found',
-        filename: filename,
-        filePath: filePath
-      });
-    }
-
-    console.log(`✅ Serving file: ${filePath}`);
-    res.download(filePath);
-  } catch (error) {
-    console.error(`❌ Error serving file ${filePath}:`, error.message);
-    res.status(500).json({ 
-      error: 'Error serving file',
+  if (!fs.existsSync(filePath)) {
+    console.log(`❌ File does not exist at: ${filePath}`);
+    return res.status(404).json({ 
+      error: 'File not found',
       filename: filename,
-      details: error.message
+      filePath: filePath
     });
   }
+
+  console.log(`✅ Serving file: ${filePath}`);
+  res.download(filePath);
 });
 
 // Get all jobs
@@ -344,17 +324,14 @@ app.get('/jobs', (req, res) => {
     });
   } catch (error) {
     console.error('Error loading jobs:', error);
-    res.status(500).json({ 
-      error: 'Failed to load jobs',
-      details: error.message
-    });
+    res.status(500).json({ error: 'Failed to load jobs' });
   }
 });
 
 // Delete a job
-app.delete('/jobs/:id', (req, res) => {
+app.delete('/jobs/:jobId', (req, res) => {
   try {
-    const jobId = req.params.id;
+    const { jobId } = req.params;
     const jobs = loadJobsFromFile();
     const jobIndex = jobs.findIndex(job => job.id === jobId);
     
@@ -365,25 +342,13 @@ app.delete('/jobs/:id', (req, res) => {
     const deletedJob = jobs.splice(jobIndex, 1)[0];
     saveJobsToFile(jobs);
     
-    // Also remove from active jobs if it's still running
-    if (activeJobs.has(jobId)) {
-      const job = activeJobs.get(jobId);
-      if (job.abortController) {
-        job.abortController.abort();
-      }
-      activeJobs.delete(jobId);
-    }
-    
     res.json({ 
       message: 'Job deleted successfully',
       deletedJob: deletedJob
     });
   } catch (error) {
     console.error('Error deleting job:', error);
-    res.status(500).json({ 
-      error: 'Failed to delete job',
-      details: error.message
-    });
+    res.status(500).json({ error: 'Failed to delete job' });
   }
 });
 
@@ -439,133 +404,76 @@ app.get('/results', (req, res) => {
 });
 
 // Background scraping function
-async function startScrapingJob(jobId, username, influencers, daysToAnalyze) {
+async function scrapeInBackground(username, jobId, days, processId) {
+  const job = Array.from(activeJobs.values()).find(j => j.id === jobId);
+  
   try {
-    // Ensure all directories exist
-    initializeDirectories();
+    // Update progress
+    job.progress = 'Setting up scrapers...';
+    io.to(jobId).emit('log', { message: 'Setting up scrapers...', timestamp: new Date().toISOString() });
     
-    const job = activeJobs.get(jobId);
-    if (!job) {
-      console.error(`❌ Job ${jobId} not found in active jobs`);
-      return;
-    }
+    // Read influencers from uploaded file
+    const influencersContent = fs.readFileSync(job.influencersFile, 'utf-8');
+    const influencers = influencersContent.split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0);
+    
+    job.progress = `Found ${influencers.length} influencers to analyze`;
+    io.to(jobId).emit('log', { message: `Found ${influencers.length} influencers to analyze`, timestamp: new Date().toISOString() });
+    
+    // Temporarily set argv[2] for the main function
+    const originalArgv = process.argv;
+    process.argv[2] = username;
+    
+    // Create a custom logger for real-time updates
+    const originalConsoleLog = console.log;
+    console.log = function(...args) {
+      const message = args.join(' ');
+      io.to(jobId).emit('log', { message, timestamp: new Date().toISOString() });
+      originalConsoleLog.apply(console, args);
+    };
+    
+    // Run the main scraping function with influencers and days
+    const results = await main(username, influencers, days, processId);
+    
+    // Restore original console.log
+    console.log = originalConsoleLog;
+    
+    // Restore original argv
+    process.argv = originalArgv;
     
     // Update job status
-    updateJobStatus(jobId, 'running', 'Starting scraper initialization...');
+    job.status = 'completed';
+    job.progress = 'Completed successfully';
+    job.results = results;
+    job.endTime = new Date().toISOString();
+    job.duration = new Date(job.endTime) - new Date(job.startTime);
     
-    // Initialize scraper manager
-    const scraperManager = new ScraperManager();
-    await scraperManager.initialize();
-    
-    console.log(`✅ Scraper manager initialized for job ${jobId}`);
-    
-    // Get my replies first
-    updateJobProgress(jobId, 0, influencers.length, 'Getting your replies...', 'my_replies');
-    
-    const myReplies = await scraperManager.getMyReplies(username, daysToAnalyze);
-    console.log(`📊 Found ${myReplies.length} of your replies`);
-    
-    // Update stats
-    updateJobStats(jobId, { totalReplies: myReplies.length });
-    
-    // Save my replies
-    const myRepliesFile = `data/tweets/${username}_my_replies.json`;
-    fs.writeFileSync(myRepliesFile, JSON.stringify(myReplies, null, 2));
-    addJobFile(jobId, myRepliesFile);
-    
-    // Process each influencer
-    let totalTweets = 0;
-    let totalUnreplied = 0;
-    let timeouts = 0;
-    let errors = 0;
-    
-    for (let i = 0; i < influencers.length; i++) {
-      const influencer = influencers[i];
-      
-      // Check if job was aborted
-      if (job.abortController?.signal.aborted) {
-        console.log(`⏹️ Job ${jobId} was aborted`);
-        updateJobStatus(jobId, 'aborted', 'Job was cancelled by user');
-        return;
-      }
-      
-      updateJobProgress(jobId, i, influencers.length, `Analyzing ${influencer}...`, 'influencer_tweets');
-      
-      try {
-        console.log(`🔍 Processing influencer ${i + 1}/${influencers.length}: ${influencer}`);
-        
-        const influencerTweets = await scraperManager.getInfluencerTweets(influencer, daysToAnalyze);
-        console.log(`📊 Found ${influencerTweets.length} tweets from ${influencer}`);
-        
-        totalTweets += influencerTweets.length;
-        
-        // Find unreplied tweets
-        const unrepliedTweets = findUnrepliedTweets(influencerTweets, myReplies);
-        console.log(`❌ Found ${unrepliedTweets.length} unreplied tweets from ${influencer}`);
-        
-        totalUnreplied += unrepliedTweets.length;
-        
-        // Save influencer tweets
-        const influencerTweetsFile = `data/tweets/${influencer}_tweets.json`;
-        fs.writeFileSync(influencerTweetsFile, JSON.stringify(influencerTweets, null, 2));
-        addJobFile(jobId, influencerTweetsFile);
-        
-        // Save unreplied tweets
-        const unrepliedTweetsFile = `data/tweets/${influencer}_unreplied_tweets.json`;
-        fs.writeFileSync(unrepliedTweetsFile, JSON.stringify(unrepliedTweets, null, 2));
-        addJobFile(jobId, unrepliedTweetsFile);
-        
-        // Update stats
-        updateJobStats(jobId, { 
-          totalTweets: totalTweets,
-          totalUnreplied: totalUnreplied
-        });
-        
-      } catch (error) {
-        console.error(`❌ Error processing ${influencer}:`, error.message);
-        errors++;
-        updateJobStats(jobId, { errors: errors });
-        
-        if (error.message.includes('timeout') || error.message.includes('rate limit')) {
-          timeouts++;
-          updateJobStats(jobId, { timeouts: timeouts });
-        }
-      }
-    }
-    
-    // Generate analysis
-    updateJobProgress(jobId, influencers.length, influencers.length, 'Generating analysis...', 'analysis');
-    
-    const analysis = generateAnalysis(username, influencers, myReplies, totalTweets, totalUnreplied, timeouts, errors);
-    
-    // Save analysis
-    const analysisFile = `data/analysis/${username}_complete_analysis.json`;
-    fs.writeFileSync(analysisFile, JSON.stringify(analysis, null, 2));
-    addJobFile(jobId, analysisFile);
-    
-    // Generate CSV
-    const csvFile = `data/csv/${username}_influencer_analysis.csv`;
-    generateCSV(analysis, csvFile);
-    addJobFile(jobId, csvFile);
-    
-    // Update final status
-    updateJobStatus(jobId, 'completed', `Analysis complete! Found ${totalUnreplied} unreplied tweets out of ${totalTweets} total tweets.`);
-    
-    console.log(`✅ Job ${jobId} completed successfully`);
-    console.log(`📊 Final stats: ${totalTweets} tweets, ${totalUnreplied} unreplied, ${timeouts} timeouts, ${errors} errors`);
+    io.to(jobId).emit('jobComplete', { results });
+    console.log(`✅ Scrape job completed for ${username} (ID: ${jobId})`);
     
   } catch (error) {
-    console.error(`❌ Error in job ${jobId}:`, error);
-    updateJobStatus(jobId, 'error', `Job failed: ${error.message}`);
-  } finally {
-    // Clean up
-    if (activeJobs.has(jobId)) {
-      const job = activeJobs.get(jobId);
-      if (job.abortController) {
-        job.abortController = null;
-      }
-    }
+    console.error(`❌ Scrape job failed for ${username} (ID: ${jobId}):`, error.message);
+    
+    // Update job status
+    job.status = 'failed';
+    job.progress = 'Failed';
+    job.error = error.message;
+    job.endTime = new Date().toISOString();
+    job.duration = new Date(job.endTime) - new Date(job.startTime);
+    
+    io.to(jobId).emit('jobFailed', { error: error.message });
   }
+  
+  // Clean up job after 1 hour
+  setTimeout(() => {
+    const jobIndex = Array.from(activeJobs.values()).findIndex(j => j.id === jobId);
+    if (jobIndex !== -1) {
+      const jobToDelete = Array.from(activeJobs.values())[jobIndex];
+      activeJobs.delete(jobToDelete.username);
+    }
+    console.log(`🧹 Cleaned up job ${jobId}`);
+  }, 60 * 60 * 1000);
 }
 
 // Serve the main HTML interface
@@ -589,131 +497,7 @@ io.on('connection', (socket) => {
 
 // Start server
 server.listen(PORT, () => {
-  // Initialize directories on startup
-  initializeDirectories();
-  
   console.log(`🚀 Twitter Scraper API server running on port ${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
   console.log(`🌐 Web interface: http://localhost:${PORT}`);
 });
-
-function generateCSV(analysis, filename) {
-  try {
-    // Ensure csv directory exists
-    const csvDir = path.dirname(filename);
-    if (!fs.existsSync(csvDir)) {
-      fs.mkdirSync(csvDir, { recursive: true });
-    }
-    
-    const csvContent = [
-      'Influencer,Total Tweets,Unreplied Tweets,Reply Rate,Last Tweet Date,Engagement Level',
-      ...analysis.influencers.map(inf => 
-        `"${inf.username}","${inf.totalTweets}","${inf.unrepliedTweets}","${inf.replyRate}%","${inf.lastTweetDate}","${inf.engagementLevel}"`
-      )
-    ].join('\n');
-    
-    fs.writeFileSync(filename, csvContent);
-    console.log(`📊 CSV saved: ${filename}`);
-  } catch (error) {
-    console.error(`❌ Error generating CSV ${filename}:`, error.message);
-  }
-}
-
-// Helper functions for job management
-function updateJobStatus(jobId, status, message) {
-  try {
-    const job = activeJobs.get(jobId);
-    if (job) {
-      job.status = status;
-      job.message = message;
-      
-      // Update in file
-      const jobs = loadJobsFromFile();
-      const jobIndex = jobs.findIndex(j => j.id === jobId);
-      if (jobIndex !== -1) {
-        jobs[jobIndex].status = status;
-        jobs[jobIndex].message = message;
-        saveJobsToFile(jobs);
-      }
-      
-      // Emit to client
-      io.to(jobId).emit('statusUpdate', { status, message });
-    }
-  } catch (error) {
-    console.error(`Error updating job status for ${jobId}:`, error.message);
-  }
-}
-
-function updateJobProgress(jobId, current, total, message, phase) {
-  try {
-    const job = activeJobs.get(jobId);
-    if (job) {
-      job.progress = {
-        current,
-        total,
-        currentInfluencer: message,
-        phase
-      };
-      
-      // Update in file
-      const jobs = loadJobsFromFile();
-      const jobIndex = jobs.findIndex(j => j.id === jobId);
-      if (jobIndex !== -1) {
-        jobs[jobIndex].progress = job.progress;
-        saveJobsToFile(jobs);
-      }
-      
-      // Emit to client
-      io.to(jobId).emit('progressUpdate', job.progress);
-      io.to(jobId).emit('log', { message, timestamp: new Date().toISOString() });
-    }
-  } catch (error) {
-    console.error(`Error updating job progress for ${jobId}:`, error.message);
-  }
-}
-
-function updateJobStats(jobId, stats) {
-  try {
-    const job = activeJobs.get(jobId);
-    if (job) {
-      job.stats = { ...job.stats, ...stats };
-      
-      // Update in file
-      const jobs = loadJobsFromFile();
-      const jobIndex = jobs.findIndex(j => j.id === jobId);
-      if (jobIndex !== -1) {
-        jobs[jobIndex].stats = job.stats;
-        saveJobsToFile(jobs);
-      }
-      
-      // Emit to client
-      io.to(jobId).emit('statsUpdate', job.stats);
-    }
-  } catch (error) {
-    console.error(`Error updating job stats for ${jobId}:`, error.message);
-  }
-}
-
-function addJobFile(jobId, filepath) {
-  try {
-    const job = activeJobs.get(jobId);
-    if (job) {
-      if (!job.files) job.files = [];
-      job.files.push(filepath);
-      
-      // Update in file
-      const jobs = loadJobsFromFile();
-      const jobIndex = jobs.findIndex(j => j.id === jobId);
-      if (jobIndex !== -1) {
-        if (!jobs[jobIndex].files) jobs[jobIndex].files = [];
-        jobs[jobIndex].files.push(filepath);
-        saveJobsToFile(jobs);
-      }
-      
-      // Emit to client
-      io.to(jobId).emit('fileAdded', { filepath });
-    }
-  } catch (error) {
-    console.error(`Error adding file to job ${jobId}:`, error.message);
-  }
-}
