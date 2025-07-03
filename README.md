@@ -41,11 +41,10 @@ A web-based Twitter scraper that analyzes influencer tweets and finds unreplied 
    npm start
    ```
 
-The startup script will automatically:
-- ✅ Check for required dependencies
-- 📁 Create all necessary directories
-- 🔧 Validate environment
-- 🚀 Start the server
+The server will automatically:
+- Create all necessary directories
+- Initialize the environment
+- Start the web interface
 
 ### Usage
 
@@ -76,7 +75,6 @@ twitter-scraper-api/
 │   ├── uploads/            # Uploaded influencer files
 │   └── jobs.json           # Job history
 ├── index.js                # Main server file
-├── start.js                # Startup script
 ├── package.json            # Dependencies
 └── README.md               # This file
 ```
@@ -106,12 +104,11 @@ For each scraping job, the system generates:
 ### Common Issues
 
 1. **"data directory doesn't exist"**
-   - The startup script should create this automatically
+   - The server should create this automatically
    - Run `pnpm start` instead of `node index.js`
 
 2. **Permission errors**
    - Ensure you have write permissions in the project directory
-   - On Linux/Mac: `chmod +x start.js`
 
 3. **Chrome/Chromium not found**
    - Puppeteer will download its own version automatically
@@ -145,8 +142,4 @@ For production deployment, consider:
 3. **SSL**: HTTPS certificates
 4. **Monitoring**: Log rotation and monitoring
 5. **Backup**: Regular backup of `data/` directory
-
-## License
-
-ISC License
 
