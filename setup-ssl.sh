@@ -43,11 +43,21 @@ print_success "SSL certificate generated"
 
 # Copy nginx configuration
 print_status "Setting up nginx configuration..."
-sudo cp nginx.conf /etc/nginx/sites-available/twitter-scraper
 
-# Enable the site
-sudo ln -sf /etc/nginx/sites-available/twitter-scraper /etc/nginx/sites-enabled/
-sudo rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+# Check if nginx is installed and find the correct config directory
+if [ -d "/etc/nginx/sites-available" ]; then
+    # Standard Ubuntu/Debian nginx
+    sudo cp nginx.conf /etc/nginx/sites-available/twitter-scraper
+    sudo ln -sf /etc/nginx/sites-available/twitter-scraper /etc/nginx/sites-enabled/
+    sudo rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+elif [ -d "/etc/nginx/conf.d" ]; then
+    # CentOS/RHEL/Fedora nginx
+    sudo cp nginx.conf /etc/nginx/conf.d/twitter-scraper.conf
+else
+    # Fallback - copy to main nginx.conf
+    print_warning "Standard nginx directories not found. Copying to main nginx.conf"
+    sudo cp nginx.conf /etc/nginx/nginx.conf
+fi
 
 # Test nginx configuration
 print_status "Testing nginx configuration..."
