@@ -2,9 +2,8 @@ import { Scraper, SearchMode, ErrorRateLimitStrategy } from "@the-convocation/tw
 import fs from "fs";
 import { argv } from "process";
 
-// Debug: Check if .env file exists and show some environment variables
+// Debug: Check environment variables
 console.log('Environment check:');
-console.log('- .env file exists:', fs.existsSync('.env'));
 console.log('- TWT_USERNAME1:', process.env.TWT_USERNAME1 ? '✓ Found' : '✗ Not found');
 console.log('- TWT_PASSWORD1:', process.env.TWT_PASSWORD1 ? '✓ Found' : '✗ Not found');
 console.log('- TWT_EMAIL1:', process.env.TWT_EMAIL1 ? '✓ Found' : '✗ Not found');
