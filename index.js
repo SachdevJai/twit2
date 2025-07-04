@@ -5,7 +5,6 @@ import { Server } from 'socket.io';
 import { main } from './find_unreplied_tweets.js';
 import fs from 'fs';
 import path from 'path';
-import dayjs from 'dayjs';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 
@@ -54,7 +53,7 @@ function initializeDirectories() {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
       console.log(`✅ Created directory: ${dir}`);
-    }
+      }
   });
   
   // Initialize jobs file if it doesn't exist
@@ -69,7 +68,7 @@ initializeDirectories();
 
 // Load jobs from file
 function loadJobsFromFile() {
-  try {
+    try {
     if (fs.existsSync(JOBS_FILE)) {
       const data = fs.readFileSync(JOBS_FILE, 'utf-8');
       return JSON.parse(data);
@@ -107,7 +106,7 @@ app.get('/health', (req, res) => {
 app.post('/scrape', upload.single('influencersFile'), async (req, res) => {
   const { username, daysBack } = req.body;
   const influencersFile = req.file;
-  
+
   if (!username) {
     return res.status(400).json({ 
       error: 'Username is required'
@@ -175,7 +174,7 @@ app.post('/scrape', upload.single('influencersFile'), async (req, res) => {
   };
 
   activeJobs.set(username, jobStatus);
-
+    
   console.log(`🚀 Starting scrape job for ${username} (ID: ${jobId})`);
 
   // Start scraping in background
@@ -234,7 +233,7 @@ app.get('/results/:jobId', (req, res) => {
       status: 'failed',
       error: job.error
     });
-  }
+}
 
   // Job completed successfully
   res.json({
@@ -272,7 +271,7 @@ app.get('/download/*', (req, res) => {
     } else if (filename.startsWith('cookies') && filename.endsWith('.json')) {
       searchDir = 'data/cookies';
     }
-    
+
     if (searchDir) {
       filePath = path.join(__dirname, searchDir, filename);
       console.log(`📁 Searching in ${searchDir}: ${filePath}`);
@@ -338,7 +337,7 @@ app.delete('/jobs/:jobId', (req, res) => {
     if (jobIndex === -1) {
       return res.status(404).json({ error: 'Job not found' });
     }
-    
+
     const deletedJob = jobs.splice(jobIndex, 1)[0];
     saveJobsToFile(jobs);
     
@@ -349,7 +348,7 @@ app.delete('/jobs/:jobId', (req, res) => {
   } catch (error) {
     console.error('Error deleting job:', error);
     res.status(500).json({ error: 'Failed to delete job' });
-  }
+    }
 });
 
 // List all results

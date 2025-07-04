@@ -1,11 +1,6 @@
 import { Scraper, SearchMode, ErrorRateLimitStrategy } from "@the-convocation/twitter-scraper";
 import fs from "fs";
-import dayjs from "dayjs";
 import { argv } from "process";
-import dotenv from "dotenv";
-
-// Load environment variables
-dotenv.config();
 
 // Debug: Check if .env file exists and show some environment variables
 console.log('Environment check:');
@@ -557,7 +552,7 @@ async function getScraper(accountNumber = 1) {
 
 // This will be set by the main function
 let influencerList = [];
-let sinceDate = dayjs().subtract(7, 'day').format('YYYY-MM-DD');
+  let sinceDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
 let totalInfluencerTweets = 0;
 let totalMyReplies = 0;
@@ -571,8 +566,8 @@ function sleep(ms) {
 
 async function getMyReplies(scraperManager) {
     // Calculate days from sinceDate for logging
-    const sinceDateObj = dayjs(sinceDate);
-    const daysDiff = dayjs().diff(sinceDateObj, 'day');
+      const sinceDateObj = new Date(sinceDate);
+  const daysDiff = Math.floor((Date.now() - sinceDateObj.getTime()) / (24 * 60 * 60 * 1000));
     console.log(`Getting your replies from the last ${daysDiff} days (since ${sinceDate})...`);
     
     let myReplies = [];
@@ -886,7 +881,7 @@ async function main(username = null, influencers = null, days = 7, processId = n
     }
     
     // Set since date based on days parameter
-    sinceDate = dayjs().subtract(days, 'day').format('YYYY-MM-DD');
+    sinceDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
     
     console.log(`Analyzing ${myUsername} with ${influencerList.length} influencers for the last ${days} days (since ${sinceDate})...`);
     console.log(`Process ID: ${processId}`);
